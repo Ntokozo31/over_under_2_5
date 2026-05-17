@@ -15,8 +15,23 @@ from fd_data import load_football_data, select_odds_timing
 from features import assemble_features, make_target_over25
 
 
+@dataclass
+class BetRow:
+    season: str
+    div: str
+    match_date: str
+    home: str
+    away: str
+    pick: str
+    odds: float
+    edge: float
+    y: int
+    win: int
+    profit: float
+
+
 def _season_sort_key(s: str) -> int:
-    # seasons like 2526, 2627, 2728
+    # seasons like 2526, 2627, 2728 ...
     s = str(s).strip()
     digits = "".join([c for c in s if c.isdigit()])
     if len(digits) >= 4:
@@ -69,24 +84,19 @@ def _pick_side_and_recommend(
         & out["odds"].astype(float).le(float(max_odds))
         & (nb >= int(min_books))
     )
+
     return out
 
 
 def _profit_for_pick(pick: str, y_over25: int, odds: float) -> float:
-    """
-    Flat staking: 1 unit per bet.
-    Return profit in units:
-      - win: (odds - 1)
-      - lose: -1
-    """
+    # Flat staking: 1 unit per bet.
+    # win => (odds-1), lose => -1
     if not np.isfinite(odds) or odds <= 1.0:
         return 0.0
-
     if pick == "OVER_2.5":
         win = int(y_over25 == 1)
     else:
         win = int(y_over25 == 0)
-
     return (odds - 1.0) if win else -1.0
 
 
@@ -104,7 +114,6 @@ def main():
     ap.add_argument("--max-odds", type=float, default=3.20)
 
     ap.add_argument("--holdout-season", default=None, help="Optional single holdout season like 2728")
-
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--log-level", default="INFO")
 
@@ -114,7 +123,6 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Load trained artifacts
     model = load(args.model_path)
     calibrator = load(args.calibrator_path)
 
@@ -129,7 +137,6 @@ def main():
     if not expected:
         raise RuntimeError("metadata.json has no cat_cols/num_cols")
 
-    # Load dataset and build features once
     raw = load_football_data(Path(args.data_root), logger=logger)
     raw = select_odds_timing(raw, odds_timing=args.odds_timing)
     feats = assemble_features(raw, logger=logger)
@@ -147,13 +154,11 @@ def main():
         raise RuntimeError(f"Need at least 2 seasons for backtest; found {seasons}")
 
     if args.holdout_season:
-        test_season = str(args.holdout_season)
-        train_seasons = [s for s in seasons if s != test_season]
-        splits = [(train_seasons, test_season)]
+        splits = [([s for s in seasons if s != str(args.holdout_season)], str(args.holdout_season))]
     else:
         splits = _walk_forward_splits(seasons)
 
-    all_bets: List[pd.DataFrame] = []
+    bet_rows: List[BetRow] = []
     fold_summaries: List[Dict[str, float]] = []
 
     for train_seasons, test_season in splits:
@@ -164,15 +169,12 @@ def main():
         te = feats[te_mask].copy().reset_index(drop=True)
         y_te = y[te_mask].copy().reset_index(drop=True)
 
-        # Align columns for inference
         for c in expected:
             if c not in te.columns:
                 te[c] = np.nan
 
-        # Predict using the deployed artifacts
         p_raw = model.predict_proba(te[expected])[:, 1]
-        p = calibrator.predict(p_raw)
-        te["p_over25"] = p
+        te["p_over25"] = calibrator.predict(p_raw)
 
         te = _pick_side_and_recommend(
             te,
@@ -186,7 +188,7 @@ def main():
         if rec.empty:
             fold_summaries.append(
                 {
-                    "test_season": str(test_season),
+                    "test_season": test_season,
                     "n_matches": float(len(te)),
                     "n_bets": 0.0,
                     "roi_per_bet": 0.0,
@@ -198,20 +200,20 @@ def main():
 
         profits = []
         for i in range(len(rec)):
-            prof = _profit_for_pick(
-                pick=str(rec.loc[i, "pick"]),
-                y_over25=int(y_te.loc[rec.index[i]]),
-                odds=float(rec.loc[i, "odds"]) if pd.notna(rec.loc[i, "odds"]) else float("nan"),
+            profits.append(
+                _profit_for_pick(
+                    pick=str(rec.loc[i, "pick"]),
+                    y_over25=int(y_te.loc[rec.index[i]]),
+                    odds=float(rec.loc[i, "odds"]) if pd.notna(rec.loc[i, "odds"]) else float("nan"),
+                )
             )
-            profits.append(prof)
 
         rec["y_over25"] = y_te.loc[rec.index].values
         rec["profit"] = profits
-        rec["win"] = (rec["profit"] > 0).astype(int)
 
         fold_summaries.append(
             {
-                "test_season": str(test_season),
+                "test_season": test_season,
                 "n_matches": float(len(te)),
                 "n_bets": float(len(rec)),
                 "roi_per_bet": float(np.mean(rec["profit"].values)),
@@ -220,23 +222,27 @@ def main():
             }
         )
 
-        # Keep only useful columns for inspection
-        keep_cols = [
-            "Season", "Div", "match_date", "HomeTeam", "AwayTeam",
-            "Avg>2.5", "Avg<2.5", "Max>2.5", "Max<2.5", "n_books_totals",
-            "p_over25", "p_under25",
-            "p_over25_implied", "p_under25_implied", "ou25_overround",
-            "edge_over25", "edge_under25",
-            "pick", "odds", "edge",
-            "y_over25", "win", "profit",
-        ]
-        keep_cols = [c for c in keep_cols if c in rec.columns]
-        all_bets.append(rec[keep_cols].copy())
+        for i in range(len(rec)):
+            bet_rows.append(
+                BetRow(
+                    season=str(rec.loc[i, "Season"]) if "Season" in rec.columns else str(test_season),
+                    div=str(rec.loc[i, "Div"]) if "Div" in rec.columns else "",
+                    match_date=str(rec.loc[i, "match_date"]) if "match_date" in rec.columns else "",
+                    home=str(rec.loc[i, "HomeTeam"]) if "HomeTeam" in rec.columns else "",
+                    away=str(rec.loc[i, "AwayTeam"]) if "AwayTeam" in rec.columns else "",
+                    pick=str(rec.loc[i, "pick"]),
+                    odds=float(rec.loc[i, "odds"]) if pd.notna(rec.loc[i, "odds"]) else float("nan"),
+                    edge=float(rec.loc[i, "edge"]) if pd.notna(rec.loc[i, "edge"]) else float("nan"),
+                    y=int(rec.loc[i, "y_over25"]),
+                    win=int(rec.loc[i, "profit"] > 0),
+                    profit=float(rec.loc[i, "profit"]),
+                )
+            )
 
     folds_df = pd.DataFrame(fold_summaries)
     folds_df.to_csv(outdir / "backtest_folds.csv", index=False)
 
-    bets_df = pd.concat(all_bets, ignore_index=True, sort=False) if all_bets else pd.DataFrame()
+    bets_df = pd.DataFrame([b.__dict__ for b in bet_rows])
     bets_df.to_csv(outdir / "backtest_bets.csv", index=False)
 
     summary = {
@@ -244,10 +250,10 @@ def main():
         "min_books": int(args.min_books),
         "min_odds": float(args.min_odds),
         "max_odds": float(args.max_odds),
-        "n_bets": int(len(bets_df)) if not bets_df.empty else 0,
+        "n_bets": int(len(bets_df)),
         "total_profit_units": float(bets_df["profit"].sum()) if not bets_df.empty else 0.0,
         "roi_per_bet": float(bets_df["profit"].mean()) if not bets_df.empty else 0.0,
-        "avg_edge": float(bets_df["edge"].mean()) if (not bets_df.empty and "edge" in bets_df.columns) else float("nan"),
+        "avg_edge": float(bets_df["edge"].mean()) if not bets_df.empty else float("nan"),
     }
     (outdir / "backtest_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
