@@ -16,6 +16,7 @@ from fd_data import load_football_data, select_odds_timing
 from features import assemble_features
 from oddsapi import OddsApiConfig, events_to_fixtures, get_odds
 from external_data import add_fivethirtyeight_spi, add_statsbomb_optional
+from football_data_org import load_fdorg_fixtures
 
 
 DEFAULT_SPORT_TO_DIV = {
@@ -107,6 +108,42 @@ def main():
         fx["Season"] = fx["commence_time_utc"].apply(season_code_from_utc)
         fx["Date"] = fx["commence_time_utc"].dt.tz_convert("UTC").dt.strftime("%d/%m/%y")
         fx["Time"] = fx["commence_time_utc"].dt.tz_convert("UTC").dt.strftime("%H:%M")
+        if not fixture_frames:
+        logger.warning("No OddsAPI fixtures found. Trying football-data.org (no odds).")
+        fdorg = load_fdorg_fixtures(logger=logger)
+        if fdorg is None or fdorg.empty:
+            raise RuntimeError("No upcoming fixtures with totals(2.5) found. Check OddsAPI or football-data.org coverage.")
+
+        # Map football-data.org competitions -> Div codes
+        fdorg_map = {
+            "PL": "E0",
+            "ELC": "E1",
+            "PD": "SP1",
+            "SD": "SP2",
+            "BL1": "D1",
+            "BL2": "D2",
+            "SA": "I1",
+            "SB": "I2",
+            "PPL": "P1",
+            "TSL": "T1",
+            "DED": "N1",
+            "BSA": "B1",
+        }
+
+        fdorg["commence_time_utc"] = pd.to_datetime(fdorg["Date"], errors="coerce", utc=True)
+        fdorg["Div"] = fdorg["fdorg_competition"].map(fdorg_map).fillna("")
+        fdorg["Season"] = fdorg["commence_time_utc"].apply(season_code_from_utc)
+        fdorg["Date"] = fdorg["commence_time_utc"].dt.tz_convert("UTC").dt.strftime("%d/%m/%y")
+        fdorg["Time"] = fdorg["commence_time_utc"].dt.tz_convert("UTC").dt.strftime("%H:%M")
+
+        # Add missing odds columns as NaN
+        for c in ["Avg>2.5", "Avg<2.5", "Max>2.5", "Max<2.5"]:
+            fdorg[c] = np.nan
+        for c in ["FTHG", "FTAG"]:
+            fdorg[c] = np.nan
+
+        fixture_frames.append(fdorg)
+
 
         # Map API aggregates into canonical football-data totals columns
         fx["Avg>2.5"] = fx["api_avg_over25_odds"]
