@@ -99,10 +99,6 @@ def add_rolling(long: pd.DataFrame, windows: List[int] = [3, 5, 10], ewm_spans: 
     """
     Leakage-safe rolling + EWM using shift(1).
     """
-def add_rolling(long: pd.DataFrame, windows: List[int] = [3, 5, 10], ewm_spans: List[int] = [10]) -> pd.DataFrame:
-    """
-    Leakage-safe rolling + EWM using shift(1).
-    """
     df = long.copy()
     base = ["gf", "ga", "gd", "points", "xg", "xa", "shots", "sot", "corners", "yellow", "red"]
     for c in base:
