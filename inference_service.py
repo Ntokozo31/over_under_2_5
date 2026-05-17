@@ -64,8 +64,20 @@ def main():
     if args.sport_to_div_map:
         sport_to_div.update(json.loads(Path(args.sport_to_div_map).read_text(encoding="utf-8")))
 
-    model = load(args.model_path)
+        model = load(args.model_path)
     calibrator = load(args.calibrator_path)
+
+    # Load training metadata for feature alignment
+    metadata_path = Path(args.model_path).with_name("metadata.json")
+    if not metadata_path.exists():
+        raise RuntimeError(f"metadata.json not found рядом с model: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    # Ensure odds timing consistency
+    if metadata.get("odds_timing") and metadata["odds_timing"] != args.odds_timing:
+        raise RuntimeError(
+            f"odds_timing mismatch: training={metadata['odds_timing']} vs inference={args.odds_timing}"
+        )
 
     hist = load_football_data(Path(args.data_root), logger=logger)
     hist = select_odds_timing(hist, args.odds_timing)
@@ -123,16 +135,17 @@ def main():
     if up.empty:
         raise RuntimeError("No upcoming rows after feature assembly.")
 
-    # Align to model expected input columns if available
-    expected = getattr(model, "feature_names_in_", None)
-    if expected is not None:
-        for c in expected:
-            if c not in up.columns:
-                up[c] = np.nan
-        X = up[list(expected)].copy()
-    else:
-        X = up.drop(columns=[c for c in ["_match_key"] if c in up.columns], errors="ignore")
+       # Use training metadata columns (strict)
+    cat_cols = metadata.get("cat_cols", [])
+    num_cols = metadata.get("num_cols", [])
+    expected = list(cat_cols) + list(num_cols)
+    if not expected:
+        raise RuntimeError("metadata.json missing cat_cols/num_cols; cannot align features.")
 
+    for c in expected:
+        if c not in up.columns:
+            up[c] = np.nan
+    X = up[expected].copy()
     p_raw = model.predict_proba(X)[:, 1]
     p = calibrator.predict(p_raw)
 
