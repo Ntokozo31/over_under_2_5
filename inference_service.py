@@ -15,6 +15,7 @@ from common import normalise_two_way_probs, setup_logging, PlattCalibrator, load
 from fd_data import load_football_data, select_odds_timing
 from features import assemble_features
 from oddsapi import OddsApiConfig, events_to_fixtures, get_odds
+from external_data import add_fivethirtyeight_spi, add_statsbomb_optional
 
 
 DEFAULT_SPORT_TO_DIV = {
@@ -81,6 +82,13 @@ def main():
 
     hist = load_football_data(Path(args.data_root), logger=logger)
     hist = select_odds_timing(hist, args.odds_timing)
+
+    # External free data sources
+    team_map = load_team_map(Path("production/team_map.json"))
+    if team_map:
+        hist = normalize_team_names(hist, team_map, team_cols=["HomeTeam", "AwayTeam"])
+    hist = add_fivethirtyeight_spi(hist, team_map=team_map, data_dir=Path(args.data_root), logger=logger)
+    hist = add_statsbomb_optional(hist, data_dir=Path(args.data_root), logger=logger)
     
     # Filter to last 3 seasons to reduce memory footprint
     hist = hist[hist["Season"].astype(str).ge("2324")].copy()
