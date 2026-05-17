@@ -23,6 +23,8 @@ from common import setup_logging, PlattCalibrator
 from fd_data import load_football_data, select_odds_timing
 from fd_audit import audit
 from features import assemble_features, make_target_over25
+from external_data import add_fivethirtyeight_spi, add_statsbomb_optional
+from common import load_team_map, normalize_team_names
 
 
 def walk_forward_splits_by_season(df: pd.DataFrame) -> List[Tuple[np.ndarray, np.ndarray, str]]:
@@ -118,6 +120,13 @@ def main():
         raw = raw[raw["Season"].astype(str) >= str(args.start_season)].copy()
 
     raw = select_odds_timing(raw, odds_timing=args.odds_timing)
+
+    # External free data sources
+    team_map = load_team_map(Path("production/team_map.json"))
+    if team_map:
+        raw = normalize_team_names(raw, team_map, team_cols=["HomeTeam", "AwayTeam"])
+    raw = add_fivethirtyeight_spi(raw, team_map=team_map, data_dir=Path(args.data_root), logger=logger)
+    raw = add_statsbomb_optional(raw, data_dir=Path(args.data_root), logger=logger)
 
     feats = assemble_features(raw, logger=logger)
     y = make_target_over25(feats)
