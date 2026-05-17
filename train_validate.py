@@ -125,15 +125,20 @@ def main():
     test_df = feats[feats["Season"].astype(str) == str(holdout)].copy().reset_index(drop=True)
     y_train = y[feats["Season"].astype(str) != str(holdout)].copy().reset_index(drop=True)
     y_test = y[feats["Season"].astype(str) == str(holdout)].copy().reset_index(drop=True)
+        # class imbalance weight for LGBM
+    pos = float(y_train.sum())
+    neg = float(len(y_train) - pos)
+    scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
     cat_cols, num_cols = get_feature_columns(train_df)
 
-    models = {
+        models = {
         "logreg_elasticnet": Pipeline([
             ("prep", make_preprocessor(cat_cols, num_cols, linear=True)),
             ("clf", LogisticRegression(
                 penalty="elasticnet", l1_ratio=0.5, solver="saga",
-                C=1.0, max_iter=8000, n_jobs=-1, random_state=args.seed
+                C=1.0, max_iter=8000, n_jobs=-1, random_state=args.seed,
+                class_weight="balanced"
             )),
         ]),
         "lgbm": Pipeline([
@@ -141,13 +146,15 @@ def main():
             ("clf", lgb.LGBMClassifier(
                 n_estimators=1200, learning_rate=0.03, num_leaves=63,
                 subsample=0.9, colsample_bytree=0.9, reg_lambda=1.0,
-                min_child_samples=50, random_state=args.seed, n_jobs=-1
+                min_child_samples=50, random_state=args.seed, n_jobs=-1,
+                scale_pos_weight=scale_pos_weight
             )),
         ]),
         "rf": Pipeline([
             ("prep", make_preprocessor(cat_cols, num_cols, linear=False)),
             ("clf", RandomForestClassifier(
-                n_estimators=800, min_samples_leaf=10, n_jobs=-1, random_state=args.seed
+                n_estimators=800, min_samples_leaf=10, n_jobs=-1, random_state=args.seed,
+                class_weight="balanced"
             )),
         ]),
     }
@@ -173,25 +180,36 @@ def main():
         fold_df = pd.DataFrame(fold_stats)
         val_mean = fold_df.mean(numeric_only=True).to_dict()
 
-        # Fit full train, then calibrate on last 20% of train_df by time
-        train_sorted = train_df.sort_values("match_date")
-        cut = int(len(train_sorted) * 0.8)
-        base_train = train_sorted.iloc[:cut]
-        calib = train_sorted.iloc[cut:]
+                # Out-of-fold calibration (time-respecting, no leakage)
+        oof = np.full(len(train_df), np.nan, dtype=float)
 
-        pipe.fit(base_train[cat_cols + num_cols], y_train.loc[base_train.index])
-        p_cal = pipe.predict_proba(calib[cat_cols + num_cols])[:, 1]
-        calibrator = PlattCalibrator(seed=args.seed).fit(y_train.loc[calib.index].values, p_cal)
+        for tr_idx, va_idx, fold_name in splits:
+            trX, trY = train_df.loc[tr_idx], y_train.loc[tr_idx]
+            vaX, vaY = train_df.loc[va_idx], y_train.loc[va_idx]
+
+            pipe.fit(trX[cat_cols + num_cols], trY)
+            p_va = pipe.predict_proba(vaX[cat_cols + num_cols])[:, 1]
+            oof[va_idx] = p_va
+
+        calibrator = None
+        mask = ~np.isnan(oof)
+        if mask.sum() >= 300:
+            calibrator = PlattCalibrator(seed=args.seed).fit(y_train.loc[mask].values, oof[mask])
+        else:
+            logger.warning("Not enough OOF samples for calibration; skipping calibration.")
+
+        # Retrain on full training data
+        pipe.fit(train_df[cat_cols + num_cols], y_train)
 
         # Holdout
         p_test = pipe.predict_proba(test_df[cat_cols + num_cols])[:, 1]
-        p_test_c = calibrator.predict(p_test)
+        p_test_c = calibrator.predict(p_test) if calibrator else p_test
 
         hold_raw = metrics(y_test.values, p_test)
-        hold_cal = metrics(y_test.values, p_test_c)
         hold_raw["ece10"] = expected_calibration_error(y_test.values, p_test, n_bins=10)
-        hold_cal["ece10"] = expected_calibration_error(y_test.values, p_test_c, n_bins=10)
 
+        hold_cal = metrics(y_test.values, p_test_c)
+        hold_cal["ece10"] = expected_calibration_error(y_test.values, p_test_c, n_bins=10)
         rows.append({
             "model": model_name,
             "val_roc_auc": float(val_mean.get("roc_auc", np.nan)),
