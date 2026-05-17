@@ -45,6 +45,8 @@ def build_team_long(df: pd.DataFrame) -> pd.DataFrame:
         "is_home": 1,
         "gf": to_float(work["FTHG"]),
         "ga": to_float(work["FTAG"]),
+        "xg": to_float(work["home_xg"]) if "home_xg" in work.columns else np.nan,
+        "xa": to_float(work["away_xg"]) if "away_xg" in work.columns else np.nan,
     })
     away = pd.DataFrame({
         "Season": work["Season"].astype(str),
@@ -56,6 +58,8 @@ def build_team_long(df: pd.DataFrame) -> pd.DataFrame:
         "is_home": 0,
         "gf": to_float(work["FTAG"]),
         "ga": to_float(work["FTHG"]),
+        "xg": to_float(work["away_xg"]) if "away_xg" in work.columns else np.nan,
+        "xa": to_float(work["home_xg"]) if "home_xg" in work.columns else np.nan,
     })
 
     # Preserve ID columns (oddsapi_event_id, commence_time_utc)
@@ -100,7 +104,7 @@ def add_rolling(long: pd.DataFrame, windows: List[int] = [3, 5, 10], ewm_spans: 
     Leakage-safe rolling + EWM using shift(1).
     """
     df = long.copy()
-    base = ["gf", "ga", "gd", "points", "shots", "sot", "corners", "yellow", "red"]
+    base = ["gf", "ga", "gd", "points", "xg", "xa", "shots", "sot", "corners", "yellow", "red"]
     for c in base:
         if c not in df.columns:
             df[c] = np.nan
@@ -185,7 +189,9 @@ def assemble_features(matches: pd.DataFrame, logger=None) -> pd.DataFrame:
     model = df[base_cols].merge(home_feat, on="_match_key", how="left").merge(away_feat, on="_match_key", how="left")
 
     # Interactions (extend as needed)
-    for f in ["all_gf_mean_5","all_ga_mean_5","all_points_mean_5","rest_days","all_shots_mean_5","all_sot_mean_5","all_corners_mean_5"]:
+    for f in ["all_gf_mean_5","all_ga_mean_5","all_points_mean_5","rest_days",
+            "all_shots_mean_5","all_sot_mean_5","all_corners_mean_5",
+            "all_xg_mean_5","all_xa_mean_5"]:
         hf, af = f"home_{f}", f"away_{f}"
         if hf in model.columns and af in model.columns:
             model[f"diff_{f}"] = to_float(model[hf]) - to_float(model[af])
