@@ -15,6 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
 
 import lightgbm as lgb
 
@@ -35,6 +36,14 @@ def walk_forward_splits_by_season(df: pd.DataFrame) -> List[Tuple[np.ndarray, np
         if len(tr_idx) and len(va_idx):
             splits.append((tr_idx, va_idx, f"val_{val_s}"))
     return splits
+
+def time_series_splits(df: pd.DataFrame, n_splits: int = 6) -> List[Tuple[np.ndarray, np.ndarray, str]]:
+    dd = df.sort_values("match_date").reset_index()
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    out: List[Tuple[np.ndarray, np.ndarray, str]] = []
+    for i, (tr, te) in enumerate(tscv.split(dd)):
+        out.append((dd.loc[tr, "index"].to_numpy(), dd.loc[te, "index"].to_numpy(), f"ts_{i+1}"))
+    return out
 
 
 def metrics(y: np.ndarray, p: np.ndarray) -> Dict[str, float]:
@@ -160,9 +169,9 @@ def main():
     }
 
     splits = walk_forward_splits_by_season(train_df)
+    ts_splits = time_series_splits(train_df, n_splits=6) if "match_date" in train_df.columns else []
     if len(splits) < 3:
         logger.warning(f"Only {len(splits)} walk-forward splits available. Consider broader season scope.")
-
     rows = []
     for model_name, pipe in models.items():
         fold_stats = []
@@ -179,6 +188,20 @@ def main():
 
         fold_df = pd.DataFrame(fold_stats)
         val_mean = fold_df.mean(numeric_only=True).to_dict()
+                # Time-series split evaluation
+        ts_stats = []
+        for tr_idx, va_idx, fold_name in ts_splits:
+            trX, trY = train_df.loc[tr_idx], y_train.loc[tr_idx]
+            vaX, vaY = train_df.loc[va_idx], y_train.loc[va_idx]
+            pipe.fit(trX[cat_cols + num_cols], trY)
+            p_va = pipe.predict_proba(vaX[cat_cols + num_cols])[:, 1]
+            ms = metrics(vaY.values, p_va)
+            ms["ece10"] = expected_calibration_error(vaY.values, p_va, n_bins=10)
+            ms["fold"] = fold_name
+            ts_stats.append(ms)
+
+        ts_df = pd.DataFrame(ts_stats)
+        ts_mean = ts_df.mean(numeric_only=True).to_dict() if len(ts_df) else {}
 
                 # Out-of-fold calibration (time-respecting, no leakage)
         oof = np.full(len(train_df), np.nan, dtype=float)
@@ -226,6 +249,10 @@ def main():
             "holdout_ece10_cal": float(hold_cal["ece10"]),
             "_pipe": pipe,
             "_cal": calibrator,
+            "ts_roc_auc": float(ts_mean.get("roc_auc", np.nan)),
+            "ts_logloss": float(ts_mean.get("logloss", np.nan)),
+            "ts_brier": float(ts_mean.get("brier", np.nan)),
+            "ts_ece10": float(ts_mean.get("ece10", np.nan)),
         })
 
     perf = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows])
